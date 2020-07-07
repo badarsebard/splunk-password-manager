@@ -1,0 +1,40 @@
+version: "3.3"
+services:
+  splunk:
+#    build:
+#      context: .
+#      dockerfile: splunk.dockerfile
+#      args:
+#        TAG: "8.0-debian"
+    image: splunk/splunk:8.0-debian
+    container_name: splunk-1
+    ports:
+      - "8000:8000"
+      - "8089:8089"
+    environment:
+      SPLUNK_START_ARGS: "--accept-license"
+      SPLUNK_PASSWORD: "changeme1"
+      SPLUNK_VERSION: "8.0-debian"
+    volumes:
+      - ./password_manager:/opt/splunk/etc/apps/password_manager
+#      - /opt/splunk/etc/apps/pyden-manager/local/
+#      - ./src/pyden:/opt/splunk/etc/apps/pyden
+#      - /opt/splunk/etc/apps/pyden/local
+#      - ./src/pyden-examples:/opt/splunk/etc/apps/pyden-examples
+#      - /opt/splunk/etc/apps/pyden-examples/local
+
+#  selenium:
+#    build:
+#      context: .
+#      dockerfile: selenium.dockerfile
+#    depends_on:
+#      - "pyden-splunk"
+#    image: pyden-selenium
+#    container_name: pyden-selenium-1
+#    entrypoint: ["python3", "/app/test/auto.py"]
+#    environment:
+#      CI_PROJECT_DIR: "/app"
+#    volumes:
+#      - ./:/app
+#      - /var/run/docker.sock:/var/run/docker.sock
+#      - /dev/shm:/dev/shm

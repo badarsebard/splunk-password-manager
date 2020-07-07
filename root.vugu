@@ -1,0 +1,94 @@
+<div>
+    <table>
+        <tr>
+            <th>App</th>
+            <th>Realm</th>
+            <th>Username</th>
+            <th>Password</th>
+        </tr>
+        <tr vg-for='i := 0; i < len(c.Data); i++'>
+            <td vg-content='c.Data[i].app'></td>
+            <td vg-content='c.Data[i].realm'></td>
+            <td vg-content='c.Data[i].username'></td>
+            <td vg-content='c.Data[i].password' vg-if="!c.Data[i].ShowPassword"></td>
+            <td vg-content='c.Data[i].clear_password' vg-if="c.Data[i].ShowPassword"></td>
+            <td vg-if="!c.Data[i].ShowPassword"><button @click="c.Data[i].ShowPassword = !c.Data[i].ShowPassword">Reveal</button></td>
+            <td vg-if="c.Data[i].ShowPassword"><button @click="c.Data[i].ShowPassword = !c.Data[i].ShowPassword">Hide</button></td>
+        </tr>
+    </table>
+</div>
+
+<script type="application/x-go">
+import "encoding/json"
+import "fmt"
+import "io/ioutil"
+import "net/http"
+import "net/url"
+import "log"
+
+type Root struct {
+    Data []Credential  `vugu:"data"`
+    Rerender bool
+}
+
+type Credential struct {
+    app string
+    realm string
+    username string
+    password string
+    clear_password string
+    ShowPassword bool `vugu:"data"`
+}
+
+func (c *Root) BeforeBuild() {
+    if c.Rerender {
+        return
+    }
+    res, err := http.PostForm("https://localhost:8089/services/auth/login", url.Values{"username": {"admin"}, "password": {"changeme1"}, "output_mode": {"json"}})
+    if err != nil {
+        log.Printf("Error fetch()ing: %v", err)
+        return
+    }
+    defer res.Body.Close()
+
+    body, err := ioutil.ReadAll(res.Body)
+    var data map[string]interface{}
+    err = json.Unmarshal([]byte(body), &data)
+
+    session_key := data["sessionKey"].(string)
+
+    client := &http.Client{}
+    req, err := http.NewRequest("GET", "https://localhost:8089/servicesNS/-/-/storage/passwords", nil)
+    if err != nil {
+        log.Printf("Error creating request: %v", err)
+    }
+    q := req.URL.Query()
+    q.Add("output_mode", "json")
+    req.URL.RawQuery = url.Values{"output_mode": {"json"}}.Encode()
+    req.Header.Add("Authorization", fmt.Sprintf("Splunk %s", session_key))
+    resp, err := client.Do(req)
+    if err != nil {
+        log.Printf("Error fetching()ing: %v", err)
+        return
+    }
+    defer resp.Body.Close()
+
+    body, err = ioutil.ReadAll(resp.Body)
+    err = json.Unmarshal([]byte(body), &data)
+    entries := data["entry"].([]interface{})
+    credentials := []Credential{}
+    for i := 0; i < len(entries); i++ {
+        entry := entries[i].(interface{}).(map[string]interface{})
+        acl := entry["acl"].(map[string]interface{})
+        app := acl["app"].(string)
+        content := entry["content"].(map[string]interface{})
+        realm := content["realm"].(string)
+        username := content["username"].(string)
+        password := content["password"].(string)
+        clear_password := content["clear_password"].(string)
+        credentials = append(credentials, Credential{app, realm, username, password, clear_password, false})
+    }
+    c.Data = credentials
+    c.Rerender = true
+}
+</script>
