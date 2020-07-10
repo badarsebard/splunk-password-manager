@@ -4,3 +4,6 @@ dist/
 password_manager/local/
 password_manager/metadata/local.meta
 0_components_vgen.go
+devserver.go
+go.sum
+main_wasm.go
