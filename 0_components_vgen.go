@@ -8,63 +8,81 @@ import "github.com/vugu/vjson"
 import "github.com/vugu/vugu"
 import js "github.com/vugu/vugu/js"
 
-import "encoding/json"
+import (
+	"encoding/json"
 
-import "io/ioutil"
-import "net/http"
-import "net/url"
-import "log"
+	"github.com/vugu/vugu/vgform"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strings"
+)
 
 type Root struct {
-	Data		[]Credential	`vugu:"data"`
-	Rerender	bool
+	Credentials   []Credential `vugu:"data"`
+	Apps          []string     `vugu:"data"`
+	Rerender      bool
+	NewCredential Credential
 }
 
 type Credential struct {
-	app		string
-	realm		string
-	username	string
-	password	string
-	clear_password	string
-	ShowPassword	bool	`vugu:"data"`
+	app            string
+	realm          string
+	username       string
+	password       string
+	clear_password string
+	ShowPassword   bool `vugu:"data"`
 }
 
 func (c *Root) BeforeBuild() {
 	if c.Rerender {
 		return
 	}
-	res, err := http.PostForm("https://localhost:8089/services/auth/login", url.Values{"username": {"admin"}, "password": {"changeme1"}, "output_mode": {"json"}})
-	if err != nil {
-		log.Printf("Error fetch()ing: %v", err)
-		return
-	}
-	defer res.Body.Close()
-
-	body, err := ioutil.ReadAll(res.Body)
-	var data map[string]interface{}
-	err = json.Unmarshal([]byte(body), &data)
-
-	session_key := data["sessionKey"].(string)
-
+	location := js.Global().Get("location").Get("origin").String() + "/en-US/splunkd/__raw"
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://localhost:8089/servicesNS/-/-/storage/passwords", nil)
+	apps_req, err := http.NewRequest("GET", location+"/servicesNS/-/-/apps/local", nil)
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
 	}
-	q := req.URL.Query()
-	q.Add("output_mode", "json")
-	req.URL.RawQuery = url.Values{"output_mode": {"json"}}.Encode()
-	req.Header.Add("Authorization", fmt.Sprintf("Splunk %s", session_key))
-	resp, err := client.Do(req)
+	apps_query := apps_req.URL.Query()
+	apps_query.Add("output_mode", "json")
+	apps_req.URL.RawQuery = apps_query.Encode()
+	apps_resp, err := client.Do(apps_req)
 	if err != nil {
-		log.Printf("Error fetching()ing: %v", err)
+		log.Printf("Error fetching: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer apps_resp.Body.Close()
 
-	body, err = ioutil.ReadAll(resp.Body)
+	var data map[string]interface{}
+	body, err := ioutil.ReadAll(apps_resp.Body)
 	err = json.Unmarshal([]byte(body), &data)
 	entries := data["entry"].([]interface{})
+	var apps []string
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i].(interface{}).(map[string]interface{})
+		app := entry["name"].(string)
+		apps = append(apps, app)
+	}
+	c.Apps = apps
+
+	password_req, err := http.NewRequest("GET", location+"/servicesNS/-/-/storage/passwords", nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+	}
+	password_query := password_req.URL.Query()
+	password_query.Add("output_mode", "json")
+	password_req.URL.RawQuery = password_query.Encode()
+	passwsord_resp, err := client.Do(password_req)
+	if err != nil {
+		log.Printf("Error fetching: %v", err)
+		return
+	}
+	defer passwsord_resp.Body.Close()
+
+	body, err = ioutil.ReadAll(passwsord_resp.Body)
+	err = json.Unmarshal([]byte(body), &data)
+	entries = data["entry"].([]interface{})
 	credentials := []Credential{}
 	for i := 0; i < len(entries); i++ {
 		entry := entries[i].(interface{}).(map[string]interface{})
@@ -77,8 +95,72 @@ func (c *Root) BeforeBuild() {
 		clear_password := content["clear_password"].(string)
 		credentials = append(credentials, Credential{app, realm, username, password, clear_password, false})
 	}
-	c.Data = credentials
+	c.Credentials = credentials
 	c.Rerender = true
+}
+
+func (c *Root) AddPassword(event vugu.DOMEvent) {
+	event.PreventDefault()
+	ee := event.EventEnv()
+	go func() {
+		ee.Lock()
+		ee.UnlockRender()
+		location := js.Global().Get("location").Get("origin").String() + "/en-US/splunkd/__raw"
+
+		client := &http.Client{}
+		payload := strings.NewReader(`realm=` + c.NewCredential.realm + `&name=` + c.NewCredential.username + `&password=` + c.NewCredential.clear_password)
+		cred_req, err := http.NewRequest("POST", location+"/servicesNS/nobody/"+c.NewCredential.app+"/storage/passwords", payload)
+		if err != nil {
+			log.Printf("Error creating request: %v", err)
+		}
+		cookies := js.Global().Get("document").Get("cookie").String()
+		i := strings.Index(cookies, "token_key")
+		j := strings.Index(cookies[i:], ";")
+		token_key := cookies[i+10 : i+j]
+		cred_req.Header.Add("X-Requested-With", "XMLHttpRequest")
+		cred_req.Header.Add("X-Splunk-Form-Key", token_key)
+		cred_resp, err := client.Do(cred_req)
+		if err != nil {
+			log.Printf("status: %v", cred_resp)
+			log.Printf("Error fetching: %v", err)
+		}
+
+		ee.Lock()
+		defer ee.UnlockRender()
+		js.Global().Get("location").Call("reload")
+	}()
+}
+
+func (c *Root) DeletePassword(event vugu.DOMEvent, cred Credential) {
+	event.PreventDefault()
+	ee := event.EventEnv()
+	go func(cred Credential) {
+		ee.Lock()
+		ee.UnlockRender()
+		location := js.Global().Get("location").Get("origin").String() + "/en-US/splunkd/__raw"
+
+		client := &http.Client{}
+		delete_req, err := http.NewRequest("DELETE", location+"/servicesNS/nobody/"+cred.app+"/storage/passwords/"+cred.realm+":"+cred.username+":", nil)
+		if err != nil {
+			log.Printf("Error deleting: %v", err)
+			return
+		}
+		cookies := js.Global().Get("document").Get("cookie").String()
+		i := strings.Index(cookies, "token_key")
+		j := strings.Index(cookies[i:], ";")
+		token_key := cookies[i+10 : i+j]
+		delete_req.Header.Add("X-Requested-With", "XMLHttpRequest")
+		delete_req.Header.Add("X-Splunk-Form-Key", token_key)
+		delete_resp, err := client.Do(delete_req)
+		if err != nil {
+			log.Printf("status: %v", delete_resp)
+			log.Printf("Error fetching: %v", err)
+		}
+
+		ee.Lock()
+		defer ee.UnlockRender()
+		js.Global().Get("location").Call("reload")
+	}(cred)
 }
 func (c *Root) Build(vgin *vugu.BuildIn) (vgout *vugu.BuildOut) {
 
@@ -88,121 +170,298 @@ func (c *Root) Build(vgin *vugu.BuildIn) (vgout *vugu.BuildOut) {
 	_ = vgiterkey
 	var vgn *vugu.VGNode
 	vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "div", Attr: []vugu.VGAttribute(nil)}
-	vgout.Out = append(vgout.Out, vgn)	// root for output
+	vgout.Out = append(vgout.Out, vgn) // root for output
 	{
 		vgparent := vgn
 		_ = vgparent
 		vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n    "}
 		vgparent.AppendChild(vgn)
-		vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "table", Attr: []vugu.VGAttribute(nil)}
+		vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "form", Attr: []vugu.VGAttribute(nil)}
 		vgparent.AppendChild(vgn)
 		{
 			vgparent := vgn
 			_ = vgparent
 			vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n        "}
 			vgparent.AppendChild(vgn)
-			vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tbody", Attr: []vugu.VGAttribute(nil)}
+			vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "table", Attr: []vugu.VGAttribute(nil)}
 			vgparent.AppendChild(vgn)
 			{
 				vgparent := vgn
 				_ = vgparent
-				vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tr", Attr: []vugu.VGAttribute(nil)}
+				vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
 				vgparent.AppendChild(vgn)
-				vgn.SetInnerHTML(vugu.HTML("\n            \x3Cth\x3EApp\x3C/th\x3E\n            \x3Cth\x3ERealm\x3C/th\x3E\n            \x3Cth\x3EUsername\x3C/th\x3E\n            \x3Cth\x3EPassword\x3C/th\x3E\n        "))
-				vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n        "}
+				vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tbody", Attr: []vugu.VGAttribute(nil)}
 				vgparent.AppendChild(vgn)
-				for i := 0; i < len(c.Data); i++ {
-					var vgiterkey interface{} = i
-					_ = vgiterkey
-					i := i
-					_ = i
+				{
+					vgparent := vgn
+					_ = vgparent
+					vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tr", Attr: []vugu.VGAttribute(nil)}
+					vgparent.AppendChild(vgn)
+					vgn.SetInnerHTML(vugu.HTML("\n                \x3Cth\x3EApp\x3C/th\x3E\n                \x3Cth\x3ERealm\x3C/th\x3E\n                \x3Cth\x3EUsername\x3C/th\x3E\n                \x3Cth\x3EPassword\x3C/th\x3E\n            "))
+					vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+					vgparent.AppendChild(vgn)
+					for i := 0; i < len(c.Credentials); i++ {
+						var vgiterkey interface{} = i
+						_ = vgiterkey
+						i := i
+						_ = i
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tr", Attr: []vugu.VGAttribute(nil)}
+						vgparent.AppendChild(vgn)
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+							vgparent.AppendChild(vgn)
+							vgn.SetInnerHTML(c.Credentials[i].app)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+							vgparent.AppendChild(vgn)
+							vgn.SetInnerHTML(c.Credentials[i].realm)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+							vgparent.AppendChild(vgn)
+							vgn.SetInnerHTML(c.Credentials[i].username)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							if !c.Credentials[i].ShowPassword {
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+								vgparent.AppendChild(vgn)
+								vgn.SetInnerHTML(c.Credentials[i].password)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							if c.Credentials[i].ShowPassword {
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+								vgparent.AppendChild(vgn)
+								vgn.SetInnerHTML(c.Credentials[i].clear_password)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							if !c.Credentials[i].ShowPassword {
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+								vgparent.AppendChild(vgn)
+								{
+									vgparent := vgn
+									_ = vgparent
+									vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
+									vgparent.AppendChild(vgn)
+									vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
+										EventType: "click",
+										Func:      func(event vugu.DOMEvent) { c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword },
+										// TODO: implement capture, etc. mostly need to decide syntax
+									})
+									{
+										vgparent := vgn
+										_ = vgparent
+										vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Reveal"}
+										vgparent.AppendChild(vgn)
+									}
+								}
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							if c.Credentials[i].ShowPassword {
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+								vgparent.AppendChild(vgn)
+								{
+									vgparent := vgn
+									_ = vgparent
+									vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
+									vgparent.AppendChild(vgn)
+									vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
+										EventType: "click",
+										Func:      func(event vugu.DOMEvent) { c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword },
+										// TODO: implement capture, etc. mostly need to decide syntax
+									})
+									{
+										vgparent := vgn
+										_ = vgparent
+										vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Hide"}
+										vgparent.AppendChild(vgn)
+									}
+								}
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+							vgparent.AppendChild(vgn)
+							{
+								vgparent := vgn
+								_ = vgparent
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
+								vgparent.AppendChild(vgn)
+								vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
+									EventType: "click",
+									Func:      func(event vugu.DOMEvent) { c.DeletePassword(event, c.Credentials[i]) },
+									// TODO: implement capture, etc. mostly need to decide syntax
+								})
+								{
+									vgparent := vgn
+									_ = vgparent
+									vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Delete"}
+									vgparent.AppendChild(vgn)
+								}
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+							vgparent.AppendChild(vgn)
+						}
+					}
+					vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+					vgparent.AppendChild(vgn)
 					vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "tr", Attr: []vugu.VGAttribute(nil)}
 					vgparent.AppendChild(vgn)
 					{
 						vgparent := vgn
 						_ = vgparent
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
 						vgparent.AppendChild(vgn)
 						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
 						vgparent.AppendChild(vgn)
-						vgn.SetInnerHTML(c.Data[i].app)
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
-						vgparent.AppendChild(vgn)
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
-						vgparent.AppendChild(vgn)
-						vgn.SetInnerHTML(c.Data[i].realm)
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
-						vgparent.AppendChild(vgn)
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
-						vgparent.AppendChild(vgn)
-						vgn.SetInnerHTML(c.Data[i].username)
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
-						vgparent.AppendChild(vgn)
-						if !c.Data[i].ShowPassword {
-							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                    "}
 							vgparent.AppendChild(vgn)
-							vgn.SetInnerHTML(c.Data[i].password)
+							{
+								vgcompKey := vugu.MakeCompKey(0x5B2857874B96E67C^vgin.CurrentPositionHash(), vgiterkey)
+								// ask BuildEnv for prior instance of this specific component
+								vgcomp, _ := vgin.BuildEnv.CachedComponent(vgcompKey).(*vgform.Select)
+								if vgcomp == nil {
+									// create new one if needed
+									vgcomp = new(vgform.Select)
+									vgin.BuildEnv.WireComponent(vgcomp)
+								}
+								vgin.BuildEnv.UseComponent(vgcompKey, vgcomp) // ensure we can use this in the cache next time around
+								vgcomp.Options = vgform.SliceOptions(c.Apps)
+								vgcomp.Value = vgform.StringPtrDefault(&c.NewCredential.app, c.Apps[0])
+								vgout.Components = append(vgout.Components, vgcomp)
+								vgn = &vugu.VGNode{Component: vgcomp}
+								vgparent.AppendChild(vgn)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
 						}
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
 						vgparent.AppendChild(vgn)
-						if c.Data[i].ShowPassword {
-							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgparent.AppendChild(vgn)
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                    "}
 							vgparent.AppendChild(vgn)
-							vgn.SetInnerHTML(c.Data[i].clear_password)
+							{
+								vgcompKey := vugu.MakeCompKey(0x2EE7D65B9CDEAFAF^vgin.CurrentPositionHash(), vgiterkey)
+								// ask BuildEnv for prior instance of this specific component
+								vgcomp, _ := vgin.BuildEnv.CachedComponent(vgcompKey).(*vgform.Input)
+								if vgcomp == nil {
+									// create new one if needed
+									vgcomp = new(vgform.Input)
+									vgin.BuildEnv.WireComponent(vgcomp)
+								}
+								vgin.BuildEnv.UseComponent(vgcompKey, vgcomp) // ensure we can use this in the cache next time around
+								vgcomp.Value = vgform.StringPtr{&c.NewCredential.realm}
+								vgcomp.AttrMap = make(map[string]interface{}, 8)
+								vgcomp.AttrMap["type"] = "text"
+								vgout.Components = append(vgout.Components, vgcomp)
+								vgn = &vugu.VGNode{Component: vgcomp}
+								vgparent.AppendChild(vgn)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
 						}
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
 						vgparent.AppendChild(vgn)
-						if !c.Data[i].ShowPassword {
-							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgparent.AppendChild(vgn)
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                    "}
 							vgparent.AppendChild(vgn)
+							{
+								vgcompKey := vugu.MakeCompKey(0xB0C7A97EB30A2991^vgin.CurrentPositionHash(), vgiterkey)
+								// ask BuildEnv for prior instance of this specific component
+								vgcomp, _ := vgin.BuildEnv.CachedComponent(vgcompKey).(*vgform.Input)
+								if vgcomp == nil {
+									// create new one if needed
+									vgcomp = new(vgform.Input)
+									vgin.BuildEnv.WireComponent(vgcomp)
+								}
+								vgin.BuildEnv.UseComponent(vgcompKey, vgcomp) // ensure we can use this in the cache next time around
+								vgcomp.Value = vgform.StringPtr{&c.NewCredential.username}
+								vgcomp.AttrMap = make(map[string]interface{}, 8)
+								vgcomp.AttrMap["type"] = "text"
+								vgout.Components = append(vgout.Components, vgcomp)
+								vgn = &vugu.VGNode{Component: vgcomp}
+								vgparent.AppendChild(vgn)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+						}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+						vgparent.AppendChild(vgn)
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgparent.AppendChild(vgn)
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                    "}
+							vgparent.AppendChild(vgn)
+							{
+								vgcompKey := vugu.MakeCompKey(0x4F868533D305F468^vgin.CurrentPositionHash(), vgiterkey)
+								// ask BuildEnv for prior instance of this specific component
+								vgcomp, _ := vgin.BuildEnv.CachedComponent(vgcompKey).(*vgform.Input)
+								if vgcomp == nil {
+									// create new one if needed
+									vgcomp = new(vgform.Input)
+									vgin.BuildEnv.WireComponent(vgcomp)
+								}
+								vgin.BuildEnv.UseComponent(vgcompKey, vgcomp) // ensure we can use this in the cache next time around
+								vgcomp.Value = vgform.StringPtr{&c.NewCredential.clear_password}
+								vgcomp.AttrMap = make(map[string]interface{}, 8)
+								vgcomp.AttrMap["type"] = "password"
+								vgout.Components = append(vgout.Components, vgcomp)
+								vgn = &vugu.VGNode{Component: vgcomp}
+								vgparent.AppendChild(vgn)
+							}
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+							vgparent.AppendChild(vgn)
+						}
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n                "}
+						vgparent.AppendChild(vgn)
+						vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
+						vgparent.AppendChild(vgn)
+						{
+							vgparent := vgn
+							_ = vgparent
+							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
+							vgparent.AppendChild(vgn)
+							vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
+								EventType: "click",
+								Func:      func(event vugu.DOMEvent) { c.AddPassword(event) },
+								// TODO: implement capture, etc. mostly need to decide syntax
+							})
 							{
 								vgparent := vgn
 								_ = vgparent
-								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
+								vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Add"}
 								vgparent.AppendChild(vgn)
-								vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
-									EventType:	"click",
-									Func:		func(event vugu.DOMEvent) { c.Data[i].ShowPassword = !c.Data[i].ShowPassword },
-									// TODO: implement capture, etc. mostly need to decide syntax
-								})
-								{
-									vgparent := vgn
-									_ = vgparent
-									vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Reveal"}
-									vgparent.AppendChild(vgn)
-								}
 							}
 						}
 						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n            "}
-						vgparent.AppendChild(vgn)
-						if c.Data[i].ShowPassword {
-							vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "td", Attr: []vugu.VGAttribute(nil)}
-							vgparent.AppendChild(vgn)
-							{
-								vgparent := vgn
-								_ = vgparent
-								vgn = &vugu.VGNode{Type: vugu.VGNodeType(3), Namespace: "", Data: "button", Attr: []vugu.VGAttribute(nil)}
-								vgparent.AppendChild(vgn)
-								vgn.DOMEventHandlerSpecList = append(vgn.DOMEventHandlerSpecList, vugu.DOMEventHandlerSpec{
-									EventType:	"click",
-									Func:		func(event vugu.DOMEvent) { c.Data[i].ShowPassword = !c.Data[i].ShowPassword },
-									// TODO: implement capture, etc. mostly need to decide syntax
-								})
-								{
-									vgparent := vgn
-									_ = vgparent
-									vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "Hide"}
-									vgparent.AppendChild(vgn)
-								}
-							}
-						}
-						vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n        "}
 						vgparent.AppendChild(vgn)
 					}
+					vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n        "}
+					vgparent.AppendChild(vgn)
 				}
-				vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n    "}
-				vgparent.AppendChild(vgn)
 			}
+			vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n    "}
+			vgparent.AppendChild(vgn)
 		}
 		vgn = &vugu.VGNode{Type: vugu.VGNodeType(1), Data: "\n"}
 		vgparent.AppendChild(vgn)
