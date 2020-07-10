@@ -2,6 +2,7 @@ bin/
 dist/
 .idea/
 password_manager/local/
+app_inspect/*
 password_manager/metadata/local.meta
 0_components_vgen.go
 devserver.go
