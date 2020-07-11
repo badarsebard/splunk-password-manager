@@ -1,37 +1,42 @@
 <div>
     <form>
         <table>
-            <tr>
-                <th>App</th>
-                <th>Realm</th>
-                <th>Username</th>
-                <th>Password</th>
-            </tr>
-            <tr vg-for='i := 0; i < len(c.Credentials); i++'>
-                <td vg-content='c.Credentials[i].app'></td>
-                <td vg-content='c.Credentials[i].realm'></td>
-                <td vg-content='c.Credentials[i].username'></td>
-                <td vg-content='c.Credentials[i].password' vg-if="!c.Credentials[i].ShowPassword"></td>
-                <td vg-content='c.Credentials[i].clear_password' vg-if="c.Credentials[i].ShowPassword"></td>
-                <td vg-if="!c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword">Reveal</button></td>
-                <td vg-if="c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword">Hide</button></td>
-                <td><button @click='c.DeletePassword(event, c.Credentials[i])'>Delete</button></td>
-            </tr>
-            <tr>
-                <td>
-                    <vgform:Select :Value='vgform.StringPtrDefault(&c.NewCredential.app, c.Apps[0])' :Options='vgform.SliceOptions(c.Apps)'></vgform:Select>
-                </td>
-                <td>
-                    <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.realm}'></vgform:Input>
-                </td>
-                <td>
-                    <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.username}'></vgform:Input>
-                </td>
-                <td>
-                    <vgform:Input type="password" :Value='vgform.StringPtr{&c.NewCredential.clear_password}'></vgform:Input>
-                </td>
-                <td><button @click='c.AddPassword(event)'>Add</button></td>
-            </tr>
+            <thead>
+                <tr>
+                    <th>App</th>
+                    <th>Realm</th>
+                    <th>Username</th>
+                    <th>Password</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr vg-for='i := 0; i < len(c.Credentials); i++'>
+                    <td vg-content='c.Credentials[i].app'></td>
+                    <td vg-content='c.Credentials[i].realm'></td>
+                    <td vg-content='c.Credentials[i].username'></td>
+                    <td vg-content='c.Credentials[i].password' vg-if="!c.Credentials[i].ShowPassword"></td>
+                    <td vg-content='c.Credentials[i].clear_password' vg-if="c.Credentials[i].ShowPassword"></td>
+                    <td vg-if="!c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword"><i class="icon-visible"></i></button><button @click='c.DeletePassword(event, c.Credentials[i])'><i class="icon-trash"></i></button></td>
+                    <td vg-if="c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword"><i class="icon-hidden"></i></button><button @click='c.DeletePassword(event, c.Credentials[i])'><i class="icon-trash"></i></button></td>
+                </tr>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td>
+                        <vgform:Select :Value='vgform.StringPtrDefault(&c.NewCredential.app, c.Apps[0])' :Options='vgform.SliceOptions(c.Apps)'></vgform:Select>
+                    </td>
+                    <td>
+                        <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.realm}'></vgform:Input>
+                    </td>
+                    <td>
+                        <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.username}'></vgform:Input>
+                    </td>
+                    <td>
+                        <vgform:Input type="password" :Value='vgform.StringPtr{&c.NewCredential.clear_password}'></vgform:Input>
+                    </td>
+                    <td><button @click='c.AddPassword(event)'><i class="icon-plus"></i></button></td>
+                </tr>
+            </tfoot>
         </table>
     </form>
 </div>
