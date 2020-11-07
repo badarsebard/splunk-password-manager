@@ -1,3 +1,3 @@
 package main
 
-//go:generate vugugen -s
+//go:generate vugugen -s src/go

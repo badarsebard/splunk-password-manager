@@ -1,10 +1,10 @@
 bin/
 dist/
 .idea/
-password_manager/local/
-app_inspect/*
-password_manager/metadata/local.meta
-0_components_vgen.go
+src/splunk/password_manager/local/
+src/splunk/password_manager/metadata/local.meta
+**_vgen.go
 devserver.go
 go.sum
 main_wasm.go
+go.mod*

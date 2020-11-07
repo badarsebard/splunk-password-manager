@@ -9,5 +9,6 @@ services:
       SPLUNK_START_ARGS: "--accept-license"
       SPLUNK_PASSWORD: "changeme1"
       SPLUNK_VERSION: "8.0-debian"
+      SPLUNK_HTTP_ENABLESSL: "true"
     volumes:
-      - ./password_manager:/opt/splunk/etc/apps/password_manager
+      - ./dist/password_manager:/opt/splunk/etc/apps/password_manager

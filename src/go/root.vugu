@@ -1,0 +1,201 @@
+<div>
+    <form>
+        <table>
+            <thead>
+                <tr>
+                    <th>App</th>
+                    <th>Realm</th>
+                    <th>Username</th>
+                    <th>Password</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr vg-for='i := 0; i < len(c.Credentials); i++'>
+                    <td vg-content='c.Credentials[i].app'></td>
+                    <td vg-content='c.Credentials[i].realm'></td>
+                    <td vg-content='c.Credentials[i].username'></td>
+                    <td vg-content='c.Credentials[i].password' vg-if="!c.Credentials[i].ShowPassword"></td>
+                    <td vg-content='c.Credentials[i].clear_password' vg-if="c.Credentials[i].ShowPassword"></td>
+                    <td vg-if="!c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword"><i class="icon-visible"></i></button><button @click='c.DeletePassword(event, c.Credentials[i])'><i class="icon-trash"></i></button></td>
+                    <td vg-if="c.Credentials[i].ShowPassword"><button @click="c.Credentials[i].ShowPassword = !c.Credentials[i].ShowPassword"><i class="icon-hidden"></i></button><button @click='c.DeletePassword(event, c.Credentials[i])'><i class="icon-trash"></i></button></td>
+                </tr>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td>
+                        <vgform:Select :Value='vgform.StringPtrDefault(&c.NewCredential.app, c.Apps[0])' :Options='vgform.SliceOptions(c.Apps)'></vgform:Select>
+                    </td>
+                    <td>
+                        <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.realm}'></vgform:Input>
+                    </td>
+                    <td>
+                        <vgform:Input type="text" :Value='vgform.StringPtr{&c.NewCredential.username}'></vgform:Input>
+                    </td>
+                    <td>
+                        <vgform:Input type="password" :Value='vgform.StringPtr{&c.NewCredential.clear_password}'></vgform:Input>
+                    </td>
+                    <td><button @click='c.AddPassword(event)'><i class="icon-plus"></i></button></td>
+                </tr>
+            </tfoot>
+        </table>
+    </form>
+</div>
+
+<script type="application/x-go">
+import (
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "net/http"
+    "github.com/vugu/vugu/vgform"
+    "strings"
+)
+
+type Root struct {
+    Credentials []Credential  `vugu:"data"`
+    Apps []string `vugu:"data"`
+    Rerender bool
+    NewCredential Credential
+}
+
+type Credential struct {
+    app string
+    realm string
+    username string
+    password string
+    clear_password string
+    ShowPassword bool `vugu:"data"`
+}
+
+func (c *Root) BeforeBuild() {
+    if c.Rerender {
+        return
+    }
+    location := js.Global().Get("location").Get("origin").String()+"/en-US/splunkd/__raw"
+    client := &http.Client{}
+    apps_req, err := http.NewRequest("GET", location+"/servicesNS/-/-/apps/local", nil)
+    if err != nil {
+        log.Printf("Error creating request: %v", err)
+    }
+    apps_query := apps_req.URL.Query()
+    apps_query.Add("output_mode", "json")
+    apps_req.URL.RawQuery = apps_query.Encode()
+    apps_resp, err := client.Do(apps_req)
+    if err != nil {
+        log.Printf("Error fetching: %v", err)
+        return
+    }
+    defer apps_resp.Body.Close()
+
+    var data map[string]interface{}
+    body, err := ioutil.ReadAll(apps_resp.Body)
+    err = json.Unmarshal([]byte(body), &data)
+    entries := data["entry"].([]interface{})
+    var apps []string
+    for i := 0; i < len(entries); i++ {
+        entry := entries[i].(interface{}).(map[string]interface{})
+        app := entry["name"].(string)
+        apps = append(apps, app)
+    }
+    c.Apps = apps
+
+    password_req, err := http.NewRequest("GET", location+"/servicesNS/-/-/storage/passwords", nil)
+    if err != nil {
+        log.Printf("Error creating request: %v", err)
+    }
+    password_query := password_req.URL.Query()
+    password_query.Add("output_mode", "json")
+    password_req.URL.RawQuery = password_query.Encode()
+    passwsord_resp, err := client.Do(password_req)
+    if err != nil {
+        log.Printf("Error fetching: %v", err)
+        return
+    }
+    defer passwsord_resp.Body.Close()
+
+    body, err = ioutil.ReadAll(passwsord_resp.Body)
+    err = json.Unmarshal([]byte(body), &data)
+    entries = data["entry"].([]interface{})
+    credentials := []Credential{}
+    for i := 0; i < len(entries); i++ {
+        entry := entries[i].(interface{}).(map[string]interface{})
+        acl := entry["acl"].(map[string]interface{})
+        app := acl["app"].(string)
+        content := entry["content"].(map[string]interface{})
+        realm := content["realm"].(string)
+        username := content["username"].(string)
+        password := content["password"].(string)
+        clear_password := content["clear_password"].(string)
+        credentials = append(credentials, Credential{app, realm, username, password, clear_password, false})
+    }
+    c.Credentials = credentials
+    c.Rerender = true
+}
+
+func (c *Root) AddPassword(event vugu.DOMEvent) {
+    event.PreventDefault()
+    ee := event.EventEnv()
+    go func() {
+        ee.Lock()
+        ee.UnlockRender()
+        location := js.Global().Get("location").Get("origin").String()+"/en-US/splunkd/__raw"
+        client := &http.Client{}
+        payload := strings.NewReader(`realm=`+c.NewCredential.realm+`&name=`+c.NewCredential.username+`&password=`+c.NewCredential.clear_password)
+        cred_req, err := http.NewRequest("POST", location+"/servicesNS/nobody/"+c.NewCredential.app+"/storage/passwords", payload)
+        if err != nil {
+            log.Printf("Error creating request: %v", err)
+        }
+
+        cookies := js.Global().Get("document").Get("cookie").String()
+        i := strings.Index(cookies, "token_key")
+        j := strings.Index(cookies[i:], ";")
+        token_key := cookies[i+10:i+j]
+        cred_req.Header.Add("X-Splunk-Form-Key", token_key)
+        cred_req.Header.Add("X-Requested-With", "XMLHttpRequest")
+
+        cred_resp, err := client.Do(cred_req)
+        if err != nil {
+            log.Printf("status: %v", cred_resp)
+            log.Printf("Error fetching: %v", err)
+        }
+
+        ee.Lock()
+        defer ee.UnlockRender()
+        js.Global().Get("location").Call("reload")
+    }()
+}
+
+func (c *Root) DeletePassword(event vugu.DOMEvent, cred Credential) {
+    event.PreventDefault()
+    ee := event.EventEnv()
+    go func(cred Credential) {
+        ee.Lock()
+        ee.UnlockRender()
+        location := js.Global().Get("location").Get("origin").String()+"/en-US/splunkd/__raw"
+
+        client := &http.Client{}
+        delete_req, err := http.NewRequest("DELETE", location+"/servicesNS/nobody/"+cred.app+"/storage/passwords/"+cred.realm+":"+cred.username+":", nil)
+        if err != nil {
+            log.Printf("Error deleting: %v", err)
+            return
+        }
+        cookies := js.Global().Get("document").Get("cookie").String()
+        i := strings.Index(cookies, "token_key")
+        j := strings.Index(cookies[i:], ";")
+        token_key := cookies[i+10:i+j]
+        delete_req.Header.Add("X-Requested-With", "XMLHttpRequest")
+        delete_req.Header.Add("X-Splunk-Form-Key", token_key)
+        delete_resp, err := client.Do(delete_req)
+        if err != nil {
+            log.Printf("status: %v", delete_resp)
+            log.Printf("Error fetching: %v", err)
+        }
+
+        ee.Lock()
+        defer ee.UnlockRender()
+        js.Global().Get("location").Call("reload")
+    }(cred)
+}
+</script>
